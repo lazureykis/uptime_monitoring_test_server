@@ -6,17 +6,23 @@ use std::sync::Mutex;
 #[derive(Clone, Debug)]
 pub enum ResponseStatus {
     HttpStatus(StatusCode),
-    Timeout,
+    /// Delay in seconds
+    Delay(u64),
 }
 
 impl ResponseStatus {
     pub fn from_str(value: &str) -> Result<Self, String> {
-        match value {
-            "timeout" => Ok(ResponseStatus::Timeout),
-            status_code => StatusCode::from_str(status_code)
-                .map(|status| ResponseStatus::HttpStatus(status))
-                .map_err(|e| format!("Invalid status: {e}")),
+        if value.starts_with("delay-") {
+            let parts = value.split('-').collect::<Vec<_>>();
+            if parts.len() == 2 {
+                let delay = parts[1].parse::<u64>().map_err(|e| format!("{:?}", e))?;
+                return Ok(ResponseStatus::Delay(delay));
+            }
         }
+
+        StatusCode::from_str(value)
+            .map(|status| ResponseStatus::HttpStatus(status))
+            .map_err(|e| format!("Invalid status: {e}"))
     }
 }
 
@@ -37,9 +43,9 @@ async fn get_respond_with_status(response: AppStateData) -> impl Responder {
 async fn process_request(status: ResponseStatus) -> HttpResponse {
     match status {
         ResponseStatus::HttpStatus(status) => HttpResponse::build(status).finish(),
-        ResponseStatus::Timeout => {
-            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
-            HttpResponse::Ok().finish()
+        ResponseStatus::Delay(seconds) => {
+            tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+            HttpResponse::Ok().body(format!("Slept for {seconds} sec\n"))
         }
     }
 }
@@ -50,7 +56,7 @@ async fn set_status(response: AppStateData, path: web::Path<(String,)>) -> impl 
         Ok(new_response) => {
             let mut response = response.lock().unwrap();
             *response = new_response;
-            HttpResponse::Ok().finish()
+            HttpResponse::Ok().body(format!("Status changed to {response:?}\n"))
         }
         Err(e) => HttpResponse::UnprocessableEntity().body(e.to_string()),
     }
@@ -59,6 +65,8 @@ async fn set_status(response: AppStateData, path: web::Path<(String,)>) -> impl 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let shared_state = web::Data::new(Mutex::new(ResponseStatus::HttpStatus(StatusCode::OK)));
+
+    println!("USAGE:\ncurl -X POST http://localhost:5555/200\ncurl -X POST http://localhost:5555/500\ncurl -X POST http://localhost:5555/delay-20");
 
     HttpServer::new(move || {
         App::new()
